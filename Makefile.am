@@ -1,0 +1,16 @@
+ACLOCAL_AMFLAGS = -I m4
+
+AM_CPPFLAGS =
+AM_CFLAGS   =
+AM_CXXFLAGS =
+AM_LDFLAGS  =
+
+AM_CPPFLAGS += $(HTTPLIB_CFLAGS)
+AM_LDFLAGS  += $(HTTPLIB_LIBS)
+
+check_PROGRAMS =
+
+check_PROGRAMS += test-ranges
+test_ranges_SOURCES = tests/test-ranges.cc
+
+TESTS = $(check_PROGRAMS)
