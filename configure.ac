@@ -20,7 +20,9 @@ AC_PROG_MAKE_SET
 m4_ifdef([LT_INIT], [LT_INIT])
 
 # Checks for libraries.
+AX_CXX_COMPILE_STDCXX([11], [ext], [mandatory])
 PKG_CHECK_MODULES([HTTPLIB], [cpp-httplib])
+PKG_CHECK_MODULES([SSL], [openssl])
 
 # Checks for header files.
 

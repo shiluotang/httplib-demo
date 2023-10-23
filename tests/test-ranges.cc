@@ -256,7 +256,7 @@ int main(int argc, char* argv[]) try {
     httplib::Client client(builder.str());
 
     std::string path = "/downloads/WePE64_V2.2.iso.txt";
-    long content_length = 0;
+    int64_t content_length = 0;
     long max_partial_size = 64;
     if (check_partial_support(client, path, content_length)) {
         // download partially
