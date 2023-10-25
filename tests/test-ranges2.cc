@@ -202,269 +202,6 @@ V sstream_cast(char const *s) {
     return sstream_cast_impl<char const*, V>::do_cast(s);
 }
 
-void dump_http_request(httplib::Request const &r) {
-    std::ostream &os = std::cout;
-    os << "REQ.METHOD = " << r.method << std::endl;
-    for (auto it = r.headers.begin(); it != r.headers.end(); ++it)
-        os << "REQ.HEADER[" << it->first << "] = " << it->second << std::endl;
-}
-
-void dump_http_response(httplib::Response const &r) {
-    std::ostream &os = std::cout;
-    os << "RES.STATUS = " << r.status << std::endl;
-    for (auto it = r.headers.begin(); it != r.headers.end(); ++it)
-        os << "RES.HEADER[" << it->first << "] = " << it->second << std::endl;
-    if (r.status != 200 && r.status != 206)
-        os << "RES.BODY = " << r.body << std::endl;
-}
-
-struct ranges_request_utility {
-    static bool check_typical_ranges_request(
-            httplib::Client &client,
-            std::string const &path,
-            int64_t &content_length) {
-        auto r = client.Head(path.c_str());
-        if (!r)
-            throw std::runtime_error("No Response");
-        dump_http_response(*r);
-        // if (r.error() != httplib::Error::Success)
-        //     throw std::runtime_error(httplib::to_string(r.error()));
-        if (r->status != 200) {
-            std::ostringstream es;
-            es << "HTTP Status: " << r->status << std::endl;
-            throw std::runtime_error(es.str());
-        }
-        if (!r->has_header("Accept-Ranges"))
-            return false;
-        if (r->get_header_value("Accept-Ranges") == "none")
-            return false;
-        if (!r->has_header("Content-Length"))
-            return false;
-        content_length = sstream_cast<int64_t>(
-                r->get_header_value("Content-Length"));
-        return true;
-    }
-
-    static void download_partial(
-            httplib::Client &client,
-            std::string const &path,
-            long off,
-            long pos) {
-        httplib::Headers headers;
-        httplib::Ranges ranges;
-        ranges.push_back({off, pos});
-        headers.insert(httplib::make_range_header(ranges));
-        // FIXME check modification
-        // https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Range_requests
-        auto r = client.Get(path.c_str(), headers);
-        if (!r)
-            throw std::runtime_error("No response");
-        dump_http_response(*r);
-        // if (r.error() != httplib::Error::Success)
-        //     throw std::runtime_error(httplib::to_string(r.error()));
-        // should be 206 Partial Content
-        bool strict_status_partial = false;
-        if (strict_status_partial && r->status != 206) {
-            std::ostringstream es;
-            es << "HTTP Status: " << r->status;
-            throw std::runtime_error(es.str());
-        }
-        std::cout << "path = " << path << std::endl;
-        std::cout
-            << "part = [" << ranges[0].first
-            << ", " << ranges[0].second
-            << "] = " << (ranges[0].second - ranges[0].first + 1)
-            << std::endl;
-        // std::cout << "body(" << r->body.size() << ") = " << r->body << std::endl;
-    }
-};
-
-class ranger {
-    public:
-        ranger(int64_t total_size, int64_t max_partial_size)
-            : _M_max_partial_size(max_partial_size)
-            , _M_total_size(total_size)
-            , _M_remain_size(_M_total_size)
-            , _M_offset(0)
-            , _M_length(0)
-        {
-        }
-
-        bool next() {
-            if (_M_remain_size <= 0)
-                return false;
-            if (_M_remain_size >= _M_max_partial_size) {
-                _M_offset = _M_total_size - _M_remain_size;
-                _M_length = _M_max_partial_size;
-            } else {
-                _M_offset = _M_total_size - _M_remain_size;
-                _M_length = _M_remain_size;
-            }
-            _M_remain_size -= _M_length;
-            return true;
-        }
-
-        int64_t offset() const {
-            return _M_offset;
-        }
-
-        int64_t length() const {
-            return _M_length;
-        }
-    protected:
-    private:
-        int64_t _M_max_partial_size;
-        int64_t _M_total_size;
-        int64_t _M_remain_size;
-        int64_t _M_offset;
-        int64_t _M_length;
-};
-
-bool breakup_url(
-        std::string const &url,
-        std::string &scheme_and_host,
-        std::string &path) {
-    std::string::size_type off = 0;
-    std::string scheme_notation = "://";
-    std::string::size_type pos = url.find(scheme_notation, off);
-    if (pos == std::string::npos)
-        return false;
-    off = pos + scheme_notation.length();
-    pos = url.find("/", off);
-    if (pos == std::string::npos)
-        pos = url.length();
-    scheme_and_host = url.substr(0, pos);
-    path = url.substr(pos);
-    if (path.empty())
-        path = "/";
-    return true;
-}
-
-[[maybe_unused]]
-bool download(
-        std::string const &resource_url,
-        std::string const &filename,
-        int max_trials = 10,
-        std::string const &partial_suffix = ".part") {
-    std::string temporary_filename = filename + partial_suffix;
-    std::string scheme_and_host;
-    std::string resource_path;
-    if (!breakup_url(resource_url, scheme_and_host, resource_path))
-        return false;
-    httplib::Client client(scheme_and_host.c_str());
-    client.set_logger([](
-                httplib::Request const &req,
-                httplib::Response const &res) {
-                dump_http_request(req);
-                dump_http_response(res);
-            });
-    auto res = client.Head(resource_path.c_str());
-    bool support_ranges_request = false;
-    bool maybe_support_ranges_request = false;
-    int64_t content_length = 0;
-    bool resource_not_found = false;
-    // probe ranges request capability
-    if (!res) {
-        std::cout << "No response" << std::endl;
-        return false;
-    }
-    if (res->status == 200) {
-        if (res->has_header("Accept-Ranges")) {
-            if (res->get_header_value("Accept-Ranges") == "bytes") {
-                support_ranges_request = true;
-                if (res->has_header("Content-Length"))
-                    content_length = sstream_cast<int64_t>(
-                            res->get_header_value("Content-Length"));
-            } else {
-                // typically Accept-Ranges: none
-                support_ranges_request = false;
-                if (res->has_header("Content-Length"))
-                    content_length = sstream_cast<int64_t>(
-                            res->get_header_value("Content-Length"));
-            }
-        } else {
-            // maybe do not support ranges request
-        }
-    } else {
-        if (res->status == 404) {
-            resource_not_found = true;
-        } else {
-            // ignore status other than "404 Not Found"
-            maybe_support_ranges_request = true;
-        }
-    }
-    if (resource_not_found)
-        return false;
-    bool completed = false;
-    for (int trials = 0; trials < max_trials && !completed; ++trials) {
-        std::cout << "trials #" << trials << std::endl;
-        int64_t already_downloaded_size = 0;
-        try {
-            already_downloaded_size = fs::get_file_size(temporary_filename);
-        } catch (std::runtime_error const&) {
-            // ignore non such file exception
-        }
-        if (content_length > 0 && already_downloaded_size == content_length) {
-            // finished
-            fs::rename(temporary_filename, filename);
-            return true;
-        }
-        httplib::Headers headers;
-        if (support_ranges_request || maybe_support_ranges_request) {
-            httplib::Ranges ranges;
-            ranges.push_back(std::make_pair<>(already_downloaded_size, -1));
-            headers.insert(httplib::make_range_header(ranges));
-        }
-        httplib::Request req;
-        httplib::Response res;
-        httplib::ContentReceiver receiver =
-            [temporary_filename, &res](char const *data, size_t size)  {
-                try {
-                    if (res.status == 206) {
-                        // 206 Partial Content
-                        fs::append(temporary_filename, data, size);
-                    } else if (res.status == 200) {
-                        // 202 OK
-                        fs::write(temporary_filename, data, size);
-                    }
-                    return true;
-                } catch (std::runtime_error const &e) {
-                    std::cout << "[c++ exception] " << e.what() << std::endl;
-                    return false;
-                } catch (...) {
-                    std::cout << "[c++ exception] " << "<UNKNOWN>" << std::endl;
-                    return false;
-                }
-            };
-        req.method = "GET";
-        req.path = resource_path;
-        req.content_receiver = [&receiver](
-                char const* data,
-                size_t size,
-                uint64_t offset,
-                uint64_t length) {
-            return receiver(data, size);
-        };
-        req.headers = headers;
-        httplib::Error err;
-        if (!client.send(req, res, err)) {
-            if (res.status == 206
-                    || res.status == 200
-                    || res.status == -1) {
-                // res.status == -1 => no response received
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                continue;
-            } else {
-                std::cout << "res.status == " << res.status << std::endl;
-            }
-        }
-        fs::rename(temporary_filename, filename);
-        // TODO How to determine
-        completed = true;
-    }
-    return false;
-}
-
 class Downloader {
     public:
         explicit Downloader(
@@ -622,6 +359,7 @@ class Downloader {
             return false;
         }
     protected:
+        static
         void dump_http_request(httplib::Request const &r) {
             std::ostream &os = std::cout;
             os << "REQ.METHOD = " << r.method << std::endl;
@@ -629,6 +367,7 @@ class Downloader {
                 os << "REQ.HEADER[" << it->first << "] = " << it->second << std::endl;
         }
 
+        static
         void dump_http_response(httplib::Response const &r) {
             std::ostream &os = std::cout;
             os << "RES.STATUS = " << r.status << std::endl;
@@ -638,6 +377,7 @@ class Downloader {
                 os << "RES.BODY = " << r.body << std::endl;
         }
 
+        static
         bool breakup_url(
                 std::string const &url,
                 std::string &scheme_and_host,
@@ -677,7 +417,7 @@ std::string find_filename(std::string const &url) {
 } // namespace
 
 int main(int argc, char* argv[]) try {
-    std::string path = "http://dev-poptest.oss-cn-beijing.aliyuncs.com/downloadxV3/firmware/2318/hmi-node?Expires=1855288231&OSSAccessKeyId=LTAI5tRSr1EKQRkaXKnKdTRs&Signature=yh8ywYi9jWnPkz24QXzfvlARCYI%3D";
+    std::string path = "https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/14.04/ubuntu-14.04.6-server-amd64.template";
     std::string filename = "";
     if (argc > 1)
         path = argv[1];
